@@ -1,0 +1,37 @@
+[package]
+name = "zscheme"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "zscheme — a Scheme interpreter for the ma actor network"
+license = "MIT"
+
+[[bin]]
+name = "zscheme"
+path = "src/main.rs"
+
+[lib]
+name = "zscheme"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+ciborium = "0.2"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+ma-core = { version = "0.10", default-features = false, features = ["config", "iroh"] }
+directories = "5"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rustyline = "14"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zeroize = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

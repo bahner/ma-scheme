@@ -1,0 +1,3 @@
+(define SKY "@did:ma:k51qzi5uqu5dh8jeiv9wtil1s2upqa13ovrqcjgkoyb0stbsac61xqa4gu26pf")
+(define ROOM (string-append SKY "#room\n"))
+(display ROOM)

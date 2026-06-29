@@ -1,0 +1,633 @@
+Network Working Document                                        zscheme
+                                                             Version 0.1
+                                                            27 June 2026
+
+
+                   zscheme: Embedded Scheme Evaluator
+                         for the ma Actor Platform
+
+
+Status of This Memo
+
+   This document specifies an experimental protocol for the ma actor
+   platform.  It is not an Internet Standards Track specification.
+
+   This document is a product of the ma project.  It may be reproduced
+   and distributed freely.
+
+Copyright Notice
+
+   Copyright (c) 2026 the ma contributors.  All rights reserved.
+
+Abstract
+
+   This document specifies zscheme, a Scheme dialect embedded in ma-
+   compatible actor clients.  zscheme provides composable macro-
+   expansion, local scripting, and direct access to the distributed ma
+   actor network using standard Lisp syntax.
+
+   Any command line containing one or more S-expression spans delimited
+   by balanced parentheses is pre-processed by the evaluator before
+   normal dispatch.  Each span is evaluated and its result is spliced
+   back into the line as a string.  The expanded line is then dispatched
+   through the normal ma command parser.
+
+   This specification is aimed at implementors of ma-compatible clients
+   and tooling.  For user documentation see the HANDBOOK and REFERENCE
+   in this repository.
+
+
+Table of Contents
+
+   1.  Introduction
+   2.  Conventions and Definitions
+   3.  Expansion Model
+     3.1.  Scan
+     3.2.  Evaluation Order
+     3.3.  Result Splicing
+     3.4.  Bare DID Handling
+   4.  Lexical Conventions
+   5.  Types
+   6.  Special Forms
+   7.  ma Primitives
+     7.1.  Dot-Path Commands
+     7.2.  Actor Messages
+     7.3.  Focus State
+   8.  Core Builtins
+     8.1.  Arithmetic
+     8.2.  Comparison
+     8.3.  Boolean
+     8.4.  Lists
+     8.5.  Type Predicates
+     8.6.  String Primitives
+     8.7.  I/O and Control
+     8.8.  Loading Scripts
+   9.  Send Primitives
+     9.1.  rpc-send
+     9.2.  msg-send
+     9.3.  chat-send
+     9.4.  emote-send
+   10. Reply Tuple Helpers
+   11. Session Environment
+   12. Standard Library
+   13. Conformance
+   14. Security Considerations
+   15. References
+
+
+1.  Introduction
+
+   zscheme integrates a Lisp/Scheme evaluator into the ma actor client
+   command pipeline.  The design goals are:
+
+   o  Allow composable, parameterised command construction without a
+      separate scripting layer.
+
+   o  Provide direct access to the ma actor network from within
+      expressions, enabling distributed computations where individual
+      function-call steps may traverse iroh QUIC transport to remote
+      did:ma: actors.
+
+   o  Remain a strict subset of standard Scheme (R7RS Small) wherever
+      the two overlap, so that existing Scheme knowledge transfers.
+
+   o  Keep the evaluator minimal.  Functions that can be expressed in
+      zscheme itself SHOULD be distributed as a standard library
+      (see Section 12) rather than built into the evaluator.
+
+   The notation (.my.aliases.sky) is a list form whose head atom starts
+   with "."; the evaluator dispatches it as a config lookup.  The
+   notation (@sky#house:enter #room) is a list form whose head starts
+   with "@"; the evaluator dispatches it as an actor RPC.  Any other
+   list is evaluated according to the standard Scheme rules.
+
+
+2.  Conventions and Definitions
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in
+   BCP 14 [RFC2119] when, and only when, they appear in all capitals.
+
+   evaluator:
+      The zscheme interpreter embedded in the ma client.
+
+   span:
+      A balanced parenthesised substring of a command line, including
+      its outermost parentheses.
+
+   session environment:
+      The top-level Scheme environment associated with a single
+      authenticated login session.
+
+   dot-path:
+      A config-tree key of the form .segment[.segment...] as defined
+      in [MA-CRUD] (see bahner/ma-spec on GitHub).
+
+   actor target:
+      A did:ma: DID-URL, optionally with a fragment, used to address
+      an ma actor.
+
+
+3.  Expansion Model
+
+3.1.  Scan
+
+   Before a command line is submitted to the normal ma command parser,
+   the client MUST scan the line character-by-character for unescaped
+   "(" characters.  Each such character begins a span.
+
+   The span ends at the matching ")", determined by counting nesting
+   depth.  String literals within the line (delimited by '"...'"'"'")
+   MUST be excluded from depth counting; parentheses inside string
+   literals MUST NOT affect the nesting depth.
+
+   The "\" character inside a string literal MUST be treated as an
+   escape prefix; the character immediately following it MUST NOT be
+   used for nesting depth purposes.
+
+   If a "(" is found without a matching ")", the implementation MUST
+   report a parse error and MUST NOT dispatch the line.
+
+   Lines that contain no "(" outside of string literals MUST be passed
+   directly to the normal command parser without evaluation.
+
+3.2.  Evaluation Order
+
+   Top-level spans within a single command line MUST be evaluated left
+   to right.  The evaluation of each span MUST complete before the
+   evaluation of any span to its right begins.
+
+   Nesting within a span is resolved by the standard Scheme evaluation
+   rules (innermost sub-expressions first); the text scanner is not
+   involved.
+
+3.3.  Result Splicing
+
+   After each span is evaluated, its result MUST be converted to a
+   string and substituted at the span's position in the line.
+
+   String   -> Verbatim string contents
+   Integer  -> Decimal representation
+   Float    -> Decimal representation
+   #t       -> The literal string "#t"
+   #f       -> The literal string "#f"
+   Nil/()   -> Empty string
+   List     -> Elements joined with a single space
+   Lambda   -> Error; MUST NOT be spliced
+   Builtin  -> Error; MUST NOT be spliced
+
+   If a span evaluates to a Lambda or Builtin value the implementation
+   MUST report an error and MUST NOT dispatch the line.
+
+3.4.  Bare DID Handling
+
+   After expansion, if the resulting line begins with "did:ma:" (without
+   a leading "@"), the command parser MUST treat it as an actor message,
+   equivalent to the same line with a leading "@".
+
+
+4.  Lexical Conventions
+
+   The zscheme lexer MUST recognise the following token classes:
+
+   o  "(" and ")" -- parentheses.
+
+   o  String literals -- delimited by '"'.  Escape sequences that MUST
+      be recognised: \\, \", \n, \t, \r.
+
+   o  Line comments -- initiated by ";" and extending to end of line.
+      Comments MUST be discarded before parsing.
+
+   o  Quote shorthand -- 'expr MUST be transformed to (quote expr)
+      during lexing.
+
+   o  Atoms -- any sequence of non-whitespace, non-parenthesis,
+      non-semicolon characters that does not match the above.
+
+   Atoms beginning with "#" that are not "#t" or "#f" MUST be treated
+   as string values (they represent ma fragment identifiers such as
+   "#room" or "#house:enter").
+
+
+5.  Types
+
+   Implementations MUST support the following value types:
+
+   Integer:
+      A 64-bit signed integer.
+
+   Float:
+      A 64-bit IEEE 754 double-precision floating-point number.
+
+   String:
+      A UTF-8 encoded sequence of bytes.
+
+   Boolean:
+      Either #t (true) or #f (false).
+
+   Nil:
+      The empty list, also written () or nil.  Nil is falsy.
+
+   List:
+      An ordered sequence of values.
+
+   Lambda:
+      A closure capturing a parameter list, a body, and a lexical
+      environment.
+
+   MaPath:
+      An atom beginning with "."; dispatched to the config layer when
+      used in function position.
+
+   MaActor:
+      An atom beginning with "@"; dispatched via RPC when used in
+      function position.
+
+   Truthiness: Only #f and Nil are falsy.  All other values MUST be
+   treated as truthy.
+
+
+6.  Special Forms
+
+6.1.  define
+
+   (define <name> <expr>)
+   (define (<name> <param>...) <body>...)
+   (define (<name> <param>... . <rest>) <body>...)
+
+   Binds <name> in the current environment.  The variadic form with
+   ". <rest>" MUST collect excess arguments into a list.
+
+6.2.  lambda / ʎ
+
+   (lambda (<param>...) <body>...)
+   (lambda (<param>... . <rest>) <body>...)
+
+   Creates a closure.  The character ʎ (U+028E) MUST be accepted as
+   an alias for the keyword lambda.
+
+6.3.  let, let*, letrec
+
+   (let    ((<var> <init>)...) <body>...)
+   (let*   ((<var> <init>)...) <body>...)
+   (letrec ((<var> <init>)...) <body>...)
+
+   let evaluates all <init> in the enclosing environment before
+   binding.  let* evaluates and binds each in sequence.  letrec
+   pre-binds all names before evaluating any <init>.
+
+6.4.  if, cond, when, unless
+
+   (if <cond> <then>)
+   (if <cond> <then> <else>)
+   (cond (<test> <expr>...)... (else <expr>...))
+   (when  <cond> <body>...)
+   (unless <cond> <body>...)
+
+   when MUST be equivalent to (if <cond> (begin <body>...)).
+   unless MUST be equivalent to (if (not <cond>) (begin <body>...)).
+
+6.5.  begin
+
+   (begin <expr>...)
+
+   Evaluates each expression in order.  MUST return the last value.
+
+6.6.  and, or
+
+   (and <expr>...)   last truthy value, or #f on first falsy
+   (or  <expr>...)   first truthy value, or #f if none
+
+   Both forms MUST short-circuit.
+
+6.7.  set!
+
+   (set! <name> <value>)
+
+   Mutates an existing binding in the lexical scope chain.  MUST signal
+   an error if <name> is not bound.
+
+6.8.  quote
+
+   (quote <expr>)   or   '<expr>
+
+   Returns <expr> unevaluated.  Symbol atoms MUST be returned as strings.
+
+
+7.  ma Primitives
+
+7.1.  Dot-Path Commands
+
+   A list form whose head atom begins with "." MUST be dispatched to
+   the config layer.
+
+   Get:
+      (.path) -- returns the leaf value as a String.  If the path
+      addresses a subtree, a List of child path strings MUST be returned.
+      MUST signal an error if neither exists.
+
+   Set:
+      (.path: "value") -- updates config; returns Nil.
+
+   Delete:
+      (.path:) -- deletes the subtree; returns Nil.
+
+   Dot-path verb dispatch (e.g. .path:edit) is NOT supported within
+   Scheme expressions.  Implementations MUST signal an error if
+   encountered.
+
+7.2.  Actor Messages
+
+   A list form whose head evaluates to a MaActor value or to a String
+   beginning with "did:ma:" MUST be dispatched as a ma actor message.
+
+   The implementation MUST:
+
+   1.  Resolve alias references in the target per [MA-CORE].
+
+   2.  If the head is a "did:ma:..." String and the first argument
+       begins with "#", append the argument to the DID without a space
+       to form the full DID-URL.
+
+   3.  Send the RPC via /ma/rpc/0.0.1.
+
+   4.  Register a one-shot reply channel keyed by the message id.
+
+   5.  Suspend the evaluator until the reply arrives or timeout.
+
+   6.  On :ok reply, MUST return the payload as a String.
+
+   7.  On :error reply or timeout, MUST propagate as an evaluator error.
+
+   Accepted target forms:
+   o  "@alias"
+   o  "@alias#fragment"
+   o  "@alias#fragment:verb"  (verb encoded in the DID-URL fragment)
+   o  "did:ma:<ipns>"
+   o  "did:ma:<ipns>#fragment"
+
+7.3.  Focus State
+
+   (use <target>)   or   (use "")
+
+   Sets the client focus context to <target>, writes the resolved
+   DID-URL to .my.ctx.runtime and (if a fragment is present) to
+   .my.ctx.room, and sets .my.ctx.use to "true".
+
+   With an empty string, toggles focus: deactivates if active, or
+   reactivates from stored .my.ctx.runtime if inactive.
+
+
+8.  Core Builtins
+
+8.1.  Arithmetic
+
+   (+  n...)      Sum; no-argument form MUST return 0.
+   (-  n...)      Unary negation or subtraction.
+   (*  n...)      Product; no-argument form MUST return 1.
+   (/  a b)       Division.  Integer inputs MUST produce Integer output.
+   (mod a b)      Integer modulo.  MUST error if b is zero.
+   (floor    n)   Floor; Integer input MUST return Integer.
+   (ceiling  n)   Ceiling; Integer input MUST return Integer.
+   (round    n)   Round to nearest.
+   (truncate n)   Truncate toward zero.
+
+8.2.  Comparison
+
+   (=  a b...)   Equality chain; MUST support mixed Int/Float.
+   (<  a b...)   Less-than chain.
+   (>  a b...)   Greater-than chain.
+   (<= a b...)   Less-than-or-equal chain.
+   (>= a b...)   Greater-than-or-equal chain.
+   (equal? a b)  Deep structural equality.
+
+   Chain comparisons MUST return #t iff the predicate holds for every
+   consecutive pair.
+
+8.3.  Boolean
+
+   (not v)   #t if v is falsy, #f otherwise.
+
+8.4.  Lists
+
+   (list  v...)    Construct a proper list.
+   (cons  a b)     Prepend a to b.
+   (car   lst)     First element.  MUST error on Nil.
+   (cdr   lst)     Tail.  Singleton MUST return Nil.
+   (null? v)       #t for Nil and the empty list.
+   (pair? v)       #t for any non-empty list.
+
+8.5.  Type Predicates
+
+   (string?    v)   True if v is a String.
+   (number?    v)   True if v is an Integer or Float.
+   (boolean?   v)   True if v is #t or #f.
+   (procedure? v)   True if v is a Lambda or Builtin.
+
+8.6.  String Primitives
+
+   These operate on UTF-8 byte sequences.
+
+   (string-append  s...)          Concatenate.
+   (string-length  s)             Length in bytes.
+   (substring      s start end)   Byte-indexed substring.
+   (string-index   hay needle)    First occurrence index as Integer,
+                                  or #f if not found.
+   (string-upcase  s)             Uppercase (locale-independent).
+   (string-downcase s)            Lowercase (locale-independent).
+   (number->string n)             Decimal string representation.
+   (string->number s)             Parse; #f on failure.
+
+   The functions string-contains, string-split, string-join,
+   string-lines, string-unlines, and string-trim MAY be provided as
+   builtins or via the standard library (Section 12).
+
+8.7.  I/O and Control
+
+   (display  v...)   Write display representation to terminal.
+   (write    v...)   Write write/quoted representation to terminal.
+   (newline)         No-op; provided for R7RS compatibility.
+   (error   msg...)  Raise a runtime error.
+   (assert  v)       Equivalent to (if (not v) (error "assertion failed")).
+
+8.8.  Loading Scripts
+
+   (include path)
+
+   Reads {path}.content from config, evaluates every top-level form in
+   the current session environment, and returns the last value.  MUST
+   signal an error if {path}.content does not exist.
+
+
+9.  Send Primitives
+
+   Unlike the @-syntax actor form (Section 7.2), these primitives return
+   structured reply tuples and MUST NOT raise on well-formed :error
+   replies.
+
+9.1.  rpc-send
+
+   (rpc-send target verb arg...) -> (:ok value) | (:error reason) | (:timeout)
+
+   Sends a /ma/rpc/0.0.1 request and blocks until reply or timeout.
+
+   target:  String accepted by Section 7.2 alias resolution.
+   verb:    String.  If not beginning with ":", the implementation MUST
+            prepend ":".
+   arg...:  Zero or more additional arguments, converted to string.
+
+   MUST return (:ok value), (:error reason), or (:timeout).
+   MUST NOT raise.
+
+9.2.  msg-send
+
+   (msg-send target body) -> (:ok msg-id) | (:error reason)
+
+   Sends a plain-text inbox message and returns immediately without
+   awaiting a reply.
+
+9.3.  chat-send
+
+   (chat-send target text) -> (:ok msg-id) | (:error reason)
+
+   As msg-send but uses the application/x-ma-chat content type.
+
+9.4.  emote-send
+
+   (emote-send target text) -> (:ok msg-id) | (:error reason)
+
+   As msg-send but uses the application/x-ma-emote content type.
+
+
+10. Reply Tuple Helpers
+
+   Reply tuples are proper lists whose first element is one of the
+   strings ":ok", ":error", or ":timeout".
+
+   (ok?     reply)   #t iff (car reply) equals ":ok".
+   (err?    reply)   #t iff (car reply) equals ":error".
+   (ok-val  reply)   Second element of (:ok value).
+                     MUST error if (ok? reply) is #f.
+   (err-msg reply)   Second element of (:error reason).
+                     MUST error if (err? reply) is #f.
+
+
+11. Session Environment
+
+   Implementations MUST maintain a session environment that persists
+   for the duration of an authenticated login session.
+
+   The session environment MUST be initialised to empty at session start
+   and MUST be cleared at session end.
+
+   Bindings made with define MUST be visible to all subsequent
+   evaluations within the same session.
+
+   Implementations are NOT REQUIRED to persist the session environment
+   across page reloads or process restarts.  Callers SHOULD use the
+   dot-path Set form (Section 7.1) to persist values across sessions.
+
+
+12. Standard Library
+
+   The zscheme standard library (stdlib.ma) provides implementations
+   of common functions in pure zscheme using only Section 8 primitives.
+
+   The library is distributed as an IPFS-addressed document.  The
+   canonical CID is published in the stdlib.cid file in this repository.
+
+   Load with:
+
+      (include ".my.doc.stdlib.ma")
+
+   Or from the terminal:
+
+      .my.doc.stdlib.ma:fetch <cid>
+      .my.doc.stdlib.ma:eval
+
+   Functions provided by the standard library that are NOT required as
+   built-in primitives:
+
+   List:    length, list-ref, list?, append, reverse, map, filter,
+            for-each, fold, fold-left, cadr, caddr, cadddr, any, every.
+
+   Numeric: abs, max, min, zero?, positive?, negative?, even?, odd?,
+            quotient, remainder.
+
+   String:  string-contains, string-split, string-join, string-lines,
+            string-unlines, string-trim.
+
+   Aliases: eq?, eqv? (both alias equal?).
+
+
+13. Conformance
+
+   A conforming implementation MUST implement:
+   o  All special forms in Section 6.
+   o  All ma primitives in Section 7.
+   o  All core builtins in Section 8.
+   o  All send primitives in Section 9.
+   o  All reply tuple helpers in Section 10.
+   o  Session environment lifecycle per Section 11.
+   o  Expansion and splicing per Section 3.
+
+   A conforming implementation SHOULD provide or make available all
+   standard library functions from Section 12.
+
+   A conforming implementation MAY provide tail-call optimisation and
+   MAY provide additional builtins not defined here.
+
+
+14. Security Considerations
+
+14.1.  Arbitrary Code Execution
+
+   zscheme evaluates arbitrary code within the client process.
+   Content fetched from IPFS (via :fetch) MUST be reviewed by the user
+   before evaluation.  Implementations MUST NOT evaluate fetched content
+   automatically.
+
+14.2.  Network Access
+
+   The send primitives allow Scheme code to send messages to arbitrary
+   actor targets.  Scripts obtained from untrusted sources SHOULD be
+   reviewed before execution.
+
+14.3.  Config Mutation
+
+   The dot-path Set and Delete forms modify client config, including
+   alias tables and focus context.  Malicious scripts could redirect
+   actor targets by overwriting aliases.
+
+14.4.  Session Isolation
+
+   Implementations MUST ensure that the session environment of one user
+   is not accessible to any other user, including across browser tabs
+   sharing the same origin.
+
+
+15. References
+
+15.1.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997.
+
+   [MA-CORE]  ma-core Rust crate.
+              <https://crates.io/crates/ma-core>
+
+   [MA-CRUD]  ma-crud-service-v1, the ma CRUD service specification.
+              See bahner/ma-spec on GitHub.
+
+   [MA-RPC]   ma-rpc-service-v1, the ma RPC service specification.
+              See bahner/ma-spec on GitHub.
+
+15.2.  Informative References
+
+   [R7RS]     Shinn, A. et al., "Revised^7 Report on the Algorithmic
+              Language Scheme", 2013.
+              <https://small.r7rs.org/>
+
+   [STDLIB]   zscheme standard library.
+              <./stdlib.ma>
